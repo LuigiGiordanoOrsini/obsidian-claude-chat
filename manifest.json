@@ -1,9 +1,9 @@
 {
   "id": "claude-chat",
   "name": "Claude Chat",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.4.0",
-  "description": "Pannello laterale con una conversazione Claude Code che lavora direttamente sulle note del vault.",
+  "description": "Side panel with a Claude Code conversation that works directly on the notes of your vault.",
   "author": "LuigiGiordanoOrsini",
   "authorUrl": "https://github.com/LuigiGiordanoOrsini",
   "isDesktopOnly": true

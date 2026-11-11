@@ -1,70 +1,71 @@
-# Claude Chat per Obsidian
+# Claude Chat for Obsidian
 
-Un pannello laterale di Obsidian con una conversazione [Claude Code](https://claude.com/claude-code) che lavora direttamente sulle note del vault, in modo simile all'estensione di Claude Code per VS Code.
+An Obsidian side panel with a [Claude Code](https://claude.com/claude-code) conversation that works directly on the notes of your vault, much like the Claude Code extension does for VS Code.
 
-> Plugin non ufficiale: non è sviluppato né approvato da Anthropic o da Obsidian.
->
-> *English summary: an unofficial Obsidian side panel that runs a Claude Code agent inside your vault. The interface is in Italian. Tested on Windows only.*
+> Unofficial plugin: it is not developed or endorsed by Anthropic or Obsidian.
 
-## Cosa fa
+## What it does
 
-- **Tasto Claude** nella barra laterale sinistra: apre il pannello chat a destra.
-- **Agente sul vault**: Claude Code parte nella cartella del vault, quindi legge e modifica le note e segue il file `CLAUDE.md`, se presente.
-- **Contesto automatico**: la nota aperta e il testo selezionato vengono passati a Claude.
-- **Permessi**: quando serve un'autorizzazione compare una scheda con Consenti / Consenti sempre / Nega.
-- **Risposte in streaming**, rese come Markdown di Obsidian; i file toccati sono collegamenti cliccabili.
+- **Claude button** in the left ribbon: opens the chat panel on the right.
+- **Agent on your vault**: Claude Code starts in the vault folder, so it reads and edits your notes and follows `CLAUDE.md`, if the vault has one.
+- **Automatic context**: the open note and any selected text are passed to Claude.
+- **Permissions**: when an authorization is needed, a card appears with Allow / Always allow / Deny.
+- **Model picker**: choose the model (Default, Fable, Opus, Sonnet, Haiku) from the chat panel. Switching model keeps the current conversation.
+- **History**: conversations are saved and can be reopened and continued from the history button.
+- **Streaming answers**, rendered as Obsidian Markdown; files Claude touched are clickable links.
 
-## Requisiti
+## Requirements
 
-- Obsidian desktop (il plugin non funziona su mobile).
-- Claude Code installato e con l'accesso già fatto. Il plugin lo cerca da solo:
-  - nell'app desktop di Claude per Windows,
-  - nell'estensione Claude Code di VS Code,
-  - nel `PATH` di sistema.
+- Obsidian desktop (the plugin does not work on mobile).
+- Claude Code installed and already signed in. The plugin looks for it automatically:
+  - in the Claude desktop app for Windows,
+  - in the Claude Code extension for VS Code,
+  - on the system `PATH`.
 
-  Se non lo trova, indica il percorso dell'eseguibile nelle impostazioni del plugin.
-- Collaudato solo su Windows. Su macOS e Linux dovrebbe funzionare se `claude` è nel `PATH`, ma non è stato provato.
+  If it is not found, set the path to the executable in the plugin settings.
+- Tested on Windows only. On macOS and Linux it should work if `claude` is on the `PATH`, but this has not been tried.
 
-## Installazione
+## Installation
 
-### Con BRAT
+### With BRAT
 
-1. Installa il plugin della community **BRAT**.
-2. In BRAT scegli "Add beta plugin" e incolla `LuigiGiordanoOrsini/obsidian-claude-chat`.
+1. Install the **BRAT** community plugin.
+2. In BRAT choose "Add beta plugin" and paste `LuigiGiordanoOrsini/obsidian-claude-chat`.
 
-### A mano
+### Manually
 
-1. Scarica `main.js`, `manifest.json` e `styles.css` dall'ultima [release](https://github.com/LuigiGiordanoOrsini/obsidian-claude-chat/releases).
-2. Copiali in `<vault>/.obsidian/plugins/claude-chat/`.
-3. Riavvia Obsidian e abilita "Claude Chat" in Impostazioni → Plugin della community.
+1. Download `main.js`, `manifest.json` and `styles.css` from the latest [release](https://github.com/LuigiGiordanoOrsini/obsidian-claude-chat/releases).
+2. Copy them into `<vault>/.obsidian/plugins/claude-chat/`.
+3. Restart Obsidian and enable "Claude Chat" in Settings → Community plugins.
 
-## Uso
+## Usage
 
-- Invio manda il messaggio, Maiusc+Invio va a capo.
-- "Stop" interrompe il lavoro in corso; il messaggio successivo riprende la stessa conversazione.
-- "+" apre una nuova conversazione.
+- Enter sends the message, Shift+Enter adds a new line.
+- "Stop" interrupts the work in progress; your next message resumes the same conversation.
+- "+" starts a new conversation.
+- The clock icon opens the history: click a conversation to reopen it, or the bin to remove it.
 
-## Livello di accesso
+## Access level
 
-In Impostazioni → Claude Chat scegli cosa può fare Claude senza chiedere:
+In Settings → Claude Chat, choose what Claude may do without asking:
 
-| Livello | Comportamento |
+| Level | Behaviour |
 |---|---|
-| Modifica le note, chiede per i comandi (predefinito) | Legge e scrive i file; chiede prima di eseguire comandi di sistema. |
-| Chiede prima di ogni modifica | Chiede anche prima di scrivere un file. |
-| Sola lettura | Legge e pianifica, non modifica nulla. |
-| Accesso completo, non chiede mai | Nessuna richiesta di permesso. Usalo solo se sai cosa comporta. |
+| Edits notes, asks before commands (default) | Reads and writes files; asks before running system commands. |
+| Asks before every edit | Also asks before writing a file. |
+| Read-only | Reads and plans, changes nothing. |
+| Full access, never asks | No permission prompts. Use it only if you understand what that implies. |
 
-## Limiti noti
+## Known limits
 
-- Nessuna anteprima delle differenze prima di una modifica.
-- La cronologia delle conversazioni non viene salvata alla chiusura di Obsidian.
-- Interfaccia solo in italiano.
+- No diff preview before an edit.
+- The history keeps the 50 most recent conversations, stored in the plugin's `data.json` inside the vault.
+- A conversation can only be continued while Claude Code still has its session on this computer; otherwise the transcript stays readable and the next message starts a fresh session.
 
 ## Privacy
 
-Il plugin non invia dati per conto suo: avvia Claude Code sul tuo computer, che comunica con Anthropic usando il tuo account. Le note che Claude legge fanno parte di quella conversazione.
+The plugin sends nothing on its own: it starts Claude Code on your computer, which talks to Anthropic with your account. The notes Claude reads become part of that conversation. Saved conversations stay in your vault.
 
-## Licenza
+## License
 
 [MIT](LICENSE)

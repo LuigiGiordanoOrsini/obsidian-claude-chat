@@ -13,21 +13,33 @@ const ICON_SVG =
   '<line x1="50" y1="8" x2="50" y2="92"/><line x1="8" y1="50" x2="92" y2="50"/>' +
   '<line x1="20" y1="20" x2="80" y2="80"/><line x1="80" y1="20" x2="20" y2="80"/></g>';
 
+const MAX_CONVERSATIONS = 50;
+
 const DEFAULT_SETTINGS = {
   claudePath: '',
   permissionMode: 'acceptEdits',
   model: '',
   includeActiveNote: true,
+  conversations: [],
 };
 
 const PERMISSION_LABELS = {
-  acceptEdits: 'Modifica le note, chiede per i comandi',
-  default: 'Chiede prima di ogni modifica',
-  plan: 'Sola lettura (pianifica, non modifica)',
-  bypassPermissions: 'Accesso completo, non chiede mai',
+  acceptEdits: 'Edits notes, asks before commands',
+  default: 'Asks before every edit',
+  plan: 'Read-only (plans, never edits)',
+  bypassPermissions: 'Full access, never asks',
 };
 
-/* ---------- Motore: trova ed esegue Claude Code ---------- */
+// Aliases understood by Claude Code; they follow the latest version of each model.
+const MODEL_PRESETS = [
+  ['', 'Default model'],
+  ['fable', 'Fable'],
+  ['opus', 'Opus'],
+  ['sonnet', 'Sonnet'],
+  ['haiku', 'Haiku'],
+];
+
+/* ---------- Engine: find and run Claude Code ---------- */
 
 function listDirs(dir) {
   try {
@@ -40,7 +52,7 @@ function listDirs(dir) {
   }
 }
 
-/** Cerca claude.exe installato dall'app desktop di Claude o dall'estensione VS Code. */
+/** Looks for the Claude Code binary shipped with the Claude desktop app, the VS Code extension, or on PATH. */
 function findClaude(configured) {
   if (configured && fs.existsSync(configured)) return configured;
   const exe = process.platform === 'win32' ? 'claude.exe' : 'claude';
@@ -72,15 +84,15 @@ function findClaude(configured) {
         bestTime = t;
       }
     } catch (e) {
-      /* non esiste */
+      /* does not exist */
     }
   }
   return best;
 }
 
 /**
- * Sessione persistente con Claude Code (stesso protocollo dell'estensione VS Code:
- * messaggi JSON su stdin/stdout, richieste di permesso via control_request).
+ * Persistent Claude Code session (same protocol the VS Code extension uses:
+ * JSON messages over stdin/stdout, permission prompts as control requests).
  * handlers: onInit(sessionId), onText(delta), onAssistant(blocks, streamed), onResult(msg),
  *           onPermission(request), onError(text), onClose(code)
  */
@@ -92,6 +104,7 @@ class ClaudeSession {
     this.buffer = '';
     this.stderr = '';
     this.streamed = false;
+    this.initialized = false;
   }
 
   get alive() {
@@ -154,9 +167,10 @@ class ClaudeSession {
     }
     const h = this.handlers;
     if (msg.type === 'system' && msg.subtype === 'init') {
+      this.initialized = true;
       h.onInit && h.onInit(msg.session_id);
     } else if (msg.type === 'stream_event') {
-      if (msg.parent_tool_use_id) return; // output dei sotto-agenti: non mostrarlo
+      if (msg.parent_tool_use_id) return; // sub-agent output: not shown
       const ev = msg.event || {};
       if (ev.type === 'content_block_delta' && ev.delta && ev.delta.type === 'text_delta') {
         this.streamed = true;
@@ -182,7 +196,7 @@ class ClaudeSession {
       } else {
         this.write({
           type: 'control_response',
-          response: { subtype: 'error', request_id: msg.request_id, error: 'Richiesta non supportata: ' + req.subtype },
+          response: { subtype: 'error', request_id: msg.request_id, error: 'Unsupported request: ' + req.subtype },
         });
       }
     }
@@ -200,7 +214,7 @@ class ClaudeSession {
   respondPermission(request, decision) {
     let response;
     if (decision === 'deny') {
-      response = { behavior: 'deny', message: "L'utente ha negato questa azione." };
+      response = { behavior: 'deny', message: 'The user denied this action.' };
     } else {
       response = { behavior: 'allow', updatedInput: request.input };
       if (decision === 'always' && request.suggestions.length) response.updatedPermissions = request.suggestions;
@@ -215,7 +229,7 @@ class ClaudeSession {
       try {
         child.kill();
       } catch (e) {
-        /* gia' terminato */
+        /* already gone */
       }
     }
   }
@@ -225,10 +239,10 @@ function describeTool(block) {
   const input = block.input || {};
   const target =
     input.file_path || input.path || input.pattern || input.command || input.description || input.query || input.url || '';
-  return { name: block.name || 'Strumento', target: String(target), filePath: input.file_path || null };
+  return { name: block.name || 'Tool', target: String(target), filePath: input.file_path || null };
 }
 
-/* ---------- Vista: pannello chat ---------- */
+/* ---------- View: chat panel ---------- */
 
 class ClaudeChatView extends obsidian.ItemView {
   constructor(leaf, plugin) {
@@ -238,6 +252,8 @@ class ClaudeChatView extends obsidian.ItemView {
     this.session = null;
     this.busy = false;
     this.turn = null;
+    this.conv = null; // conversation being recorded in the history
+    this.needsRestart = false;
   }
 
   getViewType() {
@@ -258,9 +274,15 @@ class ClaudeChatView extends obsidian.ItemView {
     const header = root.createDiv({ cls: 'claude-chat-header' });
     header.createSpan({ cls: 'claude-chat-title', text: 'Claude' });
     this.modeEl = header.createSpan({ cls: 'claude-chat-mode' });
-    const newBtn = header.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Nuova conversazione' } });
+    const historyBtn = header.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'History' } });
+    obsidian.setIcon(historyBtn, 'history');
+    historyBtn.addEventListener('click', () => this.toggleHistory());
+    const newBtn = header.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'New conversation' } });
     obsidian.setIcon(newBtn, 'plus');
     newBtn.addEventListener('click', () => this.newConversation());
+
+    this.historyEl = root.createDiv({ cls: 'claude-chat-history' });
+    this.historyEl.style.display = 'none';
 
     this.messagesEl = root.createDiv({ cls: 'claude-chat-messages' });
     this.messagesEl.addEventListener('click', (ev) => {
@@ -271,16 +293,22 @@ class ClaudeChatView extends obsidian.ItemView {
       if (href) this.app.workspace.openLinkText(href, '', ev.ctrlKey || ev.metaKey);
     });
 
-    const composer = root.createDiv({ cls: 'claude-chat-composer' });
+    const composer = (this.composerEl = root.createDiv({ cls: 'claude-chat-composer' }));
     this.contextEl = composer.createDiv({ cls: 'claude-chat-context' });
     this.inputEl = composer.createEl('textarea', {
       cls: 'claude-chat-input',
-      attr: { placeholder: 'Chiedi a Claude di lavorare sulle tue note…', rows: '3' },
+      attr: { placeholder: 'Ask Claude to work on your notes…', rows: '3' },
     });
     const actions = composer.createDiv({ cls: 'claude-chat-actions' });
+    this.modelEl = actions.createEl('select', { cls: 'dropdown claude-chat-model', attr: { 'aria-label': 'Model' } });
+    this.modelEl.addEventListener('change', async () => {
+      this.plugin.settings.model = this.modelEl.value;
+      await this.plugin.saveSettings();
+    });
+    actions.createDiv({ cls: 'claude-chat-spacer' });
     this.stopBtn = actions.createEl('button', { text: 'Stop' });
     this.stopBtn.addEventListener('click', () => this.stop(true));
-    this.sendBtn = actions.createEl('button', { cls: 'mod-cta', text: 'Invia' });
+    this.sendBtn = actions.createEl('button', { cls: 'mod-cta', text: 'Send' });
     this.sendBtn.addEventListener('click', () => this.send());
     this.inputEl.addEventListener('keydown', (ev) => {
       if (ev.key === 'Enter' && !ev.shiftKey && !ev.isComposing) {
@@ -291,6 +319,7 @@ class ClaudeChatView extends obsidian.ItemView {
 
     this.registerEvent(this.app.workspace.on('active-leaf-change', () => this.refreshContext()));
     this.registerEvent(this.app.workspace.on('file-open', () => this.refreshContext()));
+    this.refreshModels();
     this.refreshContext();
     this.setBusy(false);
     this.showWelcome();
@@ -303,24 +332,41 @@ class ClaudeChatView extends obsidian.ItemView {
   showWelcome() {
     this.messagesEl.empty();
     const w = this.messagesEl.createDiv({ cls: 'claude-chat-welcome' });
-    w.createEl('p', { text: 'Claude lavora direttamente sui file di questo vault e segue le regole di CLAUDE.md.' });
-    w.createEl('p', { text: 'Invio per mandare, Maiusc+Invio per andare a capo.' });
+    w.createEl('p', { text: 'Claude works directly on the files of this vault and follows CLAUDE.md, if present.' });
+    w.createEl('p', { text: 'Enter to send, Shift+Enter for a new line.' });
   }
 
   newConversation() {
     this.stop(false);
     this.sessionId = null;
+    this.conv = null;
+    this.hideHistory();
     this.showWelcome();
     this.inputEl.focus();
   }
 
-  /** Chiamato quando cambiano le impostazioni: la sessione riparte al prossimo messaggio. */
+  /** Settings or model changed: the session restarts (and resumes) on the next message. */
   onSettingsChanged() {
-    if (!this.busy) this.stop(false);
+    if (this.busy) this.needsRestart = true;
+    else if (this.session) {
+      this.session.kill();
+      this.session = null;
+    }
+    this.refreshModels();
     this.refreshContext();
   }
 
-  /** Nota attiva nell'editor e testo selezionato. */
+  refreshModels() {
+    if (!this.modelEl) return;
+    const current = this.plugin.settings.model || '';
+    this.modelEl.empty();
+    const presets = MODEL_PRESETS.slice();
+    if (!presets.some((p) => p[0] === current)) presets.push([current, current]);
+    presets.forEach(([value, label]) => this.modelEl.createEl('option', { value, text: label }));
+    this.modelEl.value = current;
+  }
+
+  /** Active note in the editor and its selected text. */
   getContext() {
     if (!this.plugin.settings.includeActiveNote) return null;
     const file = this.app.workspace.getActiveFile();
@@ -345,17 +391,17 @@ class ClaudeChatView extends obsidian.ItemView {
     const chip = this.contextEl.createSpan({ cls: 'claude-chat-chip' });
     obsidian.setIcon(chip.createSpan({ cls: 'claude-chat-chip-icon' }), 'file-text');
     chip.createSpan({ text: path.basename(ctx.path, '.md') });
-    chip.setAttr('aria-label', 'Nota aperta: Claude la riceve come contesto');
+    chip.setAttr('aria-label', 'Open note: Claude receives it as context');
   }
 
   setBusy(busy) {
     this.busy = busy;
     this.sendBtn.disabled = busy;
     this.stopBtn.style.display = busy ? '' : 'none';
-    this.sendBtn.setText(busy ? 'Sto lavorando…' : 'Invia');
+    this.sendBtn.setText(busy ? 'Working…' : 'Send');
   }
 
-  /** Ferma il lavoro in corso. La conversazione resta: il prossimo messaggio la riprende. */
+  /** Stops the work in progress. The conversation stays: the next message resumes it. */
   stop(announce) {
     const wasBusy = this.busy;
     if (this.session) {
@@ -368,7 +414,7 @@ class ClaudeChatView extends obsidian.ItemView {
     });
     if (wasBusy) {
       this.endTurn();
-      if (announce) this.addNote('Interrotto.');
+      if (announce) this.addNote('Stopped.');
     }
   }
 
@@ -376,11 +422,102 @@ class ClaudeChatView extends obsidian.ItemView {
     this.messagesEl.scrollTop = this.messagesEl.scrollHeight;
   }
 
-  addNote(text, cls) {
+  /* --- History --- */
+
+  record(item) {
+    if (this.conv) this.conv.items.push(item);
+  }
+
+  async persist() {
+    const conv = this.conv;
+    if (!conv) return;
+    conv.sessionId = this.sessionId;
+    conv.updated = Date.now();
+    const list = this.plugin.settings.conversations.filter((c) => c.id !== conv.id);
+    list.unshift(conv);
+    this.plugin.settings.conversations = list.slice(0, MAX_CONVERSATIONS);
+    await this.plugin.saveData(this.plugin.settings);
+  }
+
+  toggleHistory() {
+    if (this.historyEl.style.display === 'none') this.showHistory();
+    else this.hideHistory();
+  }
+
+  hideHistory() {
+    this.historyEl.style.display = 'none';
+    this.messagesEl.style.display = '';
+    this.composerEl.style.display = '';
+  }
+
+  showHistory() {
+    const el = this.historyEl;
+    el.empty();
+    el.style.display = '';
+    this.messagesEl.style.display = 'none';
+    this.composerEl.style.display = 'none';
+
+    const top = el.createDiv({ cls: 'claude-chat-history-top' });
+    top.createSpan({ cls: 'claude-chat-history-heading', text: 'History' });
+    const back = top.createEl('button', { text: 'Back to chat' });
+    back.addEventListener('click', () => this.hideHistory());
+
+    const list = this.plugin.settings.conversations;
+    if (!list.length) {
+      el.createDiv({ cls: 'claude-chat-welcome', text: 'No saved conversations yet.' });
+      return;
+    }
+    list.forEach((conv) => {
+      const row = el.createDiv({ cls: 'claude-chat-history-row' });
+      if (this.conv && this.conv.id === conv.id) row.addClass('is-current');
+      const main = row.createDiv({ cls: 'claude-chat-history-main' });
+      main.createDiv({ cls: 'claude-chat-history-title', text: conv.title || 'Untitled' });
+      main.createDiv({ cls: 'claude-chat-history-date', text: new Date(conv.updated).toLocaleString() });
+      main.addEventListener('click', () => this.loadConversation(conv));
+      const del = row.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Delete from history' } });
+      obsidian.setIcon(del, 'trash-2');
+      del.addEventListener('click', async (ev) => {
+        ev.stopPropagation();
+        this.plugin.settings.conversations = this.plugin.settings.conversations.filter((c) => c.id !== conv.id);
+        await this.plugin.saveData(this.plugin.settings);
+        if (this.conv && this.conv.id === conv.id) this.conv = null;
+        this.showHistory();
+      });
+    });
+  }
+
+  loadConversation(conv) {
+    this.stop(false);
+    this.conv = conv;
+    this.sessionId = conv.sessionId || null;
+    this.messagesEl.empty();
+    for (const item of conv.items) {
+      if (item.t === 'user') this.renderUser(item.text, item.ctx);
+      else if (item.t === 'assistant') {
+        const b = this.messagesEl.createDiv({ cls: 'claude-chat-msg is-assistant markdown-rendered' });
+        this.renderInto(b, item.text);
+      } else if (item.t === 'tool') this.renderTool(item);
+      else if (item.t === 'note') this.addNote(item.text, item.cls);
+    }
+    this.hideHistory();
+    this.scrollToBottom();
+    this.inputEl.focus();
+  }
+
+  /* --- Message rendering --- */
+
+  addNote(text, cls, keep) {
     const el = this.messagesEl.createDiv({ cls: 'claude-chat-note ' + (cls || '') });
     el.setText(text);
+    if (keep) this.record({ t: 'note', text, cls: cls || '' });
     this.scrollToBottom();
     return el;
+  }
+
+  renderUser(text, ctxLabel) {
+    const el = this.messagesEl.createDiv({ cls: 'claude-chat-msg is-user' });
+    el.setText(text);
+    if (ctxLabel) el.createDiv({ cls: 'claude-chat-msg-context', text: ctxLabel });
   }
 
   toVaultRelative(filePath) {
@@ -390,30 +527,38 @@ class ClaudeChatView extends obsidian.ItemView {
     return r.split(path.sep).join('/');
   }
 
-  addTool(block) {
-    const info = describeTool(block);
+  /** item: { name, target, rel } */
+  renderTool(item) {
     const el = this.messagesEl.createDiv({ cls: 'claude-chat-tool' });
     obsidian.setIcon(el.createSpan({ cls: 'claude-chat-tool-icon' }), 'wrench');
-    el.createSpan({ cls: 'claude-chat-tool-name', text: info.name });
-    if (info.target) {
-      const rel = this.toVaultRelative(info.filePath);
-      if (rel) {
-        const a = el.createEl('a', { cls: 'internal-link claude-chat-tool-target', text: rel });
-        a.setAttr('data-href', rel);
-      } else {
-        const t = info.target.length > 90 ? info.target.slice(0, 90) + '…' : info.target;
-        el.createSpan({ cls: 'claude-chat-tool-target', text: t });
-      }
+    el.createSpan({ cls: 'claude-chat-tool-name', text: item.name });
+    if (item.rel) {
+      const a = el.createEl('a', { cls: 'internal-link claude-chat-tool-target', text: item.rel });
+      a.setAttr('data-href', item.rel);
+    } else if (item.target) {
+      el.createSpan({ cls: 'claude-chat-tool-target', text: item.target });
     }
     this.scrollToBottom();
   }
 
-  /** Scheda "Claude chiede il permesso": Consenti / Consenti sempre / Nega. */
+  addTool(block) {
+    const info = describeTool(block);
+    const item = {
+      t: 'tool',
+      name: info.name,
+      target: info.target.length > 90 ? info.target.slice(0, 90) + '…' : info.target,
+      rel: this.toVaultRelative(info.filePath),
+    };
+    this.record(item);
+    this.renderTool(item);
+  }
+
+  /** "Claude asks for permission" card: Allow / Always allow / Deny. */
   addPermission(request) {
     this.clearThinking();
     const session = this.session;
     const card = this.messagesEl.createDiv({ cls: 'claude-chat-permission' });
-    card.createDiv({ cls: 'claude-chat-permission-title', text: 'Claude chiede il permesso: ' + request.toolName });
+    card.createDiv({ cls: 'claude-chat-permission-title', text: 'Claude asks for permission: ' + request.toolName });
     const info = describeTool({ name: request.toolName, input: request.input });
     const rel = this.toVaultRelative(info.filePath);
     if (rel || info.target) card.createEl('pre', { cls: 'claude-chat-permission-detail', text: rel || info.target });
@@ -425,19 +570,19 @@ class ClaudeChatView extends obsidian.ItemView {
       row.createSpan({ cls: 'claude-chat-permission-answer', text: label });
       if (session && session.alive) session.respondPermission(request, decision);
     };
-    const allow = row.createEl('button', { cls: 'mod-cta', text: 'Consenti' });
-    allow.addEventListener('click', () => answer('allow', 'Consentito'));
+    const allow = row.createEl('button', { cls: 'mod-cta', text: 'Allow' });
+    allow.addEventListener('click', () => answer('allow', 'Allowed'));
     if (request.suggestions.length) {
-      const always = row.createEl('button', { text: 'Consenti sempre' });
-      always.setAttr('aria-label', 'Non chiedere più per azioni di questo tipo in questa conversazione');
-      always.addEventListener('click', () => answer('always', 'Consentito per questa conversazione'));
+      const always = row.createEl('button', { text: 'Always allow' });
+      always.setAttr('aria-label', 'Stop asking for this kind of action in this conversation');
+      always.addEventListener('click', () => answer('always', 'Allowed for this conversation'));
     }
-    const deny = row.createEl('button', { text: 'Nega' });
-    deny.addEventListener('click', () => answer('deny', 'Negato'));
+    const deny = row.createEl('button', { text: 'Deny' });
+    deny.addEventListener('click', () => answer('deny', 'Denied'));
     this.scrollToBottom();
   }
 
-  /* --- Bolla di risposta in streaming --- */
+  /* --- Streaming answer bubble --- */
 
   clearThinking() {
     if (this.turn && this.turn.thinking) {
@@ -471,7 +616,7 @@ class ClaudeChatView extends obsidian.ItemView {
     }
   }
 
-  /** Chiude la bolla corrente: dopo un uso di strumento il testo riparte in una bolla nuova. */
+  /** Closes the current bubble: after a tool use, text continues in a new one. */
   closeBubble() {
     const t = this.turn;
     if (!t) return;
@@ -479,7 +624,10 @@ class ClaudeChatView extends obsidian.ItemView {
       window.clearTimeout(t.timer);
       t.timer = null;
     }
-    if (t.bubble) this.renderInto(t.bubble, t.text);
+    if (t.bubble) {
+      this.renderInto(t.bubble, t.text);
+      if (t.text.trim()) this.record({ t: 'assistant', text: t.text });
+    }
     t.bubble = null;
     t.text = '';
   }
@@ -489,6 +637,14 @@ class ClaudeChatView extends obsidian.ItemView {
     this.closeBubble();
     this.turn = null;
     this.setBusy(false);
+    if (this.needsRestart) {
+      this.needsRestart = false;
+      if (this.session) {
+        this.session.kill();
+        this.session = null;
+      }
+    }
+    this.persist();
   }
 
   ensureSession() {
@@ -496,19 +652,20 @@ class ClaudeChatView extends obsidian.ItemView {
     const claudePath = findClaude(this.plugin.settings.claudePath);
     if (!claudePath) {
       this.addNote(
-        'Non trovo Claude Code su questo computer. Indica il percorso di claude.exe in Impostazioni → Claude Chat.',
+        'Claude Code was not found on this computer. Set the path to the claude executable in Settings → Claude Chat.',
         'is-error'
       );
       return false;
     }
     const view = this;
+    const resuming = !!this.sessionId;
     const session = new ClaudeSession(
       {
         claudePath,
         cwd: this.plugin.getVaultPath(),
         sessionId: this.sessionId,
         permissionMode: this.plugin.settings.permissionMode,
-        model: this.plugin.settings.model.trim(),
+        model: (this.plugin.settings.model || '').trim(),
       },
       {
         onInit: (sid) => {
@@ -531,10 +688,20 @@ class ClaudeChatView extends obsidian.ItemView {
         },
         onPermission: (request) => view.addPermission(request),
         onResult: (msg) => {
+          const failed = msg.is_error || (msg.subtype && msg.subtype !== 'success');
+          if (failed && resuming && !session.initialized) {
+            // The saved Claude Code session is gone: keep the transcript, start fresh next time.
+            view.sessionId = null;
+            session.kill();
+            if (view.session === session) view.session = null;
+            view.addNote('This conversation could not be resumed. Send your message again to continue in a fresh session.', 'is-error');
+            view.endTurn();
+            return;
+          }
           if (msg.session_id) view.sessionId = msg.session_id;
-          if (msg.is_error || (msg.subtype && msg.subtype !== 'success')) {
-            const detail = typeof msg.result === 'string' && msg.result ? msg.result : msg.subtype || 'errore';
-            view.addNote('Il turno si è chiuso con un errore: ' + detail, 'is-error');
+          if (failed) {
+            const detail = typeof msg.result === 'string' && msg.result ? msg.result : msg.subtype || 'error';
+            view.addNote('The turn ended with an error: ' + detail, 'is-error', true);
           }
           view.endTurn();
           view.inputEl.focus();
@@ -542,10 +709,15 @@ class ClaudeChatView extends obsidian.ItemView {
         onError: (text) => view.addNote(text, 'is-error'),
         onClose: (code) => {
           if (view.session === session) view.session = null;
-          if (view.busy) {
-            view.addNote('Claude Code si è chiuso' + (code ? ' (codice ' + code + ').' : '.'), 'is-error');
-            view.endTurn();
+          if (!view.busy) return;
+          if (code && resuming && !session.initialized) {
+            // The saved Claude Code session is gone: keep the transcript, start fresh next time.
+            view.sessionId = null;
+            view.addNote('This conversation could not be resumed. Send your message again to continue in a fresh session.', 'is-error');
+          } else {
+            view.addNote('Claude Code exited' + (code ? ' (code ' + code + ').' : '.'), 'is-error');
           }
+          view.endTurn();
         },
       }
     );
@@ -563,29 +735,37 @@ class ClaudeChatView extends obsidian.ItemView {
     if (this.messagesEl.querySelector('.claude-chat-welcome')) this.messagesEl.empty();
     this.inputEl.value = '';
 
-    const userEl = this.messagesEl.createDiv({ cls: 'claude-chat-msg is-user' });
-    userEl.setText(text);
-
     const ctx = this.getContext();
     let prompt = text;
+    let ctxLabel = '';
     if (ctx) {
-      let pre = '[Contesto da Obsidian] Nota aperta: ' + ctx.path;
-      if (ctx.selection.trim()) pre += '\nTesto selezionato:\n"""\n' + ctx.selection + '\n"""';
+      let pre = '[Context from Obsidian] Open note: ' + ctx.path;
+      if (ctx.selection.trim()) pre += '\nSelected text:\n"""\n' + ctx.selection + '\n"""';
       prompt = pre + '\n\n' + text;
-      userEl.createDiv({
-        cls: 'claude-chat-msg-context',
-        text: path.basename(ctx.path, '.md') + (ctx.selection.trim() ? ' (selezione)' : ''),
-      });
+      ctxLabel = path.basename(ctx.path, '.md') + (ctx.selection.trim() ? ' (selection)' : '');
     }
+
+    if (!this.conv) {
+      this.conv = {
+        id: Date.now().toString(36) + Math.random().toString(36).slice(2, 8),
+        sessionId: null,
+        title: text.replace(/\s+/g, ' ').slice(0, 70),
+        updated: Date.now(),
+        items: [],
+      };
+    }
+    this.record({ t: 'user', text, ctx: ctxLabel });
+    this.renderUser(text, ctxLabel);
+    this.persist();
 
     this.turn = { bubble: null, text: '', timer: null, thinking: null };
     this.setBusy(true);
-    this.turn.thinking = this.addNote('Claude sta pensando…', 'is-thinking');
+    this.turn.thinking = this.addNote('Claude is thinking…', 'is-thinking');
     this.session.sendUser(prompt);
   }
 }
 
-/* ---------- Impostazioni ---------- */
+/* ---------- Settings ---------- */
 
 class ClaudeChatSettingTab extends obsidian.PluginSettingTab {
   constructor(app, plugin) {
@@ -599,8 +779,8 @@ class ClaudeChatSettingTab extends obsidian.PluginSettingTab {
     const found = findClaude(this.plugin.settings.claudePath);
 
     new obsidian.Setting(containerEl)
-      .setName('Livello di accesso')
-      .setDesc('Cosa può fare Claude senza chiedere. Quando serve un permesso, nella chat compare una scheda con Consenti / Nega.')
+      .setName('Access level')
+      .setDesc('What Claude may do without asking. When a permission is needed, a card with Allow / Deny appears in the chat.')
       .addDropdown((d) => {
         Object.keys(PERMISSION_LABELS).forEach((k) => d.addOption(k, PERMISSION_LABELS[k]));
         d.setValue(this.plugin.settings.permissionMode).onChange(async (v) => {
@@ -610,8 +790,8 @@ class ClaudeChatSettingTab extends obsidian.PluginSettingTab {
       });
 
     new obsidian.Setting(containerEl)
-      .setName('Passa la nota aperta come contesto')
-      .setDesc('Claude riceve il percorso della nota attiva e l\'eventuale testo selezionato.')
+      .setName('Send the open note as context')
+      .setDesc('Claude receives the path of the active note and any selected text.')
       .addToggle((t) =>
         t.setValue(this.plugin.settings.includeActiveNote).onChange(async (v) => {
           this.plugin.settings.includeActiveNote = v;
@@ -620,18 +800,18 @@ class ClaudeChatSettingTab extends obsidian.PluginSettingTab {
       );
 
     new obsidian.Setting(containerEl)
-      .setName('Modello')
-      .setDesc('Lascia vuoto per usare quello predefinito di Claude Code. Esempi: sonnet, opus, haiku.')
+      .setName('Model')
+      .setDesc('You can also pick it from the chat panel. Leave empty for the Claude Code default, or type an alias (fable, opus, sonnet, haiku) or a full model ID.')
       .addText((t) =>
         t.setValue(this.plugin.settings.model).onChange(async (v) => {
-          this.plugin.settings.model = v;
+          this.plugin.settings.model = v.trim();
           await this.plugin.saveSettings();
         })
       );
 
     new obsidian.Setting(containerEl)
-      .setName('Percorso di Claude Code')
-      .setDesc('Lascia vuoto per la ricerca automatica. Trovato ora: ' + (found || 'nessuno'))
+      .setName('Claude Code path')
+      .setDesc('Leave empty for automatic detection. Currently found: ' + (found || 'none'))
       .addText((t) =>
         t
           .setPlaceholder('C:\\...\\claude.exe')
@@ -639,6 +819,20 @@ class ClaudeChatSettingTab extends obsidian.PluginSettingTab {
           .onChange(async (v) => {
             this.plugin.settings.claudePath = v.trim();
             await this.plugin.saveSettings();
+          })
+      );
+
+    new obsidian.Setting(containerEl)
+      .setName('History')
+      .setDesc(this.plugin.settings.conversations.length + ' saved conversations (the most recent ' + MAX_CONVERSATIONS + ' are kept).')
+      .addButton((b) =>
+        b
+          .setButtonText('Clear history')
+          .setWarning()
+          .onClick(async () => {
+            this.plugin.settings.conversations = [];
+            await this.plugin.saveData(this.plugin.settings);
+            this.display();
           })
       );
   }
@@ -649,17 +843,18 @@ class ClaudeChatSettingTab extends obsidian.PluginSettingTab {
 class ClaudeChatPlugin extends obsidian.Plugin {
   async onload() {
     this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+    if (!Array.isArray(this.settings.conversations)) this.settings.conversations = [];
     obsidian.addIcon(ICON_ID, ICON_SVG);
     this.registerView(VIEW_TYPE, (leaf) => new ClaudeChatView(leaf, this));
     this.addRibbonIcon(ICON_ID, 'Claude', () => this.activateView());
     this.addCommand({
       id: 'open-claude-chat',
-      name: 'Apri la chat con Claude',
+      name: 'Open chat',
       callback: () => this.activateView(),
     });
     this.addCommand({
       id: 'new-claude-conversation',
-      name: 'Nuova conversazione con Claude',
+      name: 'New conversation',
       callback: async () => {
         const view = await this.activateView();
         if (view) view.newConversation();
