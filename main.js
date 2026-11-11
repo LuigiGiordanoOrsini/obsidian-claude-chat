@@ -280,6 +280,9 @@ class ClaudeChatView extends obsidian.ItemView {
     const newBtn = header.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'New conversation' } });
     obsidian.setIcon(newBtn, 'plus');
     newBtn.addEventListener('click', () => this.newConversation());
+    const closeBtn = header.createEl('button', { cls: 'clickable-icon', attr: { 'aria-label': 'Close panel' } });
+    obsidian.setIcon(closeBtn, 'x');
+    closeBtn.addEventListener('click', () => this.leaf.detach());
 
     this.historyEl = root.createDiv({ cls: 'claude-chat-history' });
     this.historyEl.style.display = 'none';

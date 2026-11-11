@@ -43,6 +43,7 @@ An Obsidian side panel with a [Claude Code](https://claude.com/claude-code) conv
 - Enter sends the message, Shift+Enter adds a new line.
 - "Stop" interrupts the work in progress; your next message resumes the same conversation.
 - "+" starts a new conversation.
+- "×" closes the panel; the Claude button in the ribbon opens it again. The conversation stays in the history.
 - The clock icon opens the history: click a conversation to reopen it, or the bin to remove it.
 
 ## Access level

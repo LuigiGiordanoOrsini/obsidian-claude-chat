@@ -1,7 +1,7 @@
 {
   "id": "claude-chat",
   "name": "Claude Chat",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "minAppVersion": "1.4.0",
   "description": "Side panel with a Claude Code conversation that works directly on the notes of your vault.",
   "author": "LuigiGiordanoOrsini",
